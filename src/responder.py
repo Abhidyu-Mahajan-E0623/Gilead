@@ -13,7 +13,12 @@ IDENTIFIER_PATTERNS = {
     "NPI": re.compile(r"\bNPI\b\s*[:#-]?\s*(\d{10})", re.IGNORECASE),
     "HCO ID": re.compile(r"\bHCO\s+ID\b\s*[:#-]?\s*([A-Z0-9-]+)", re.IGNORECASE),
 }
-TERRITORY_ID_PATTERN = re.compile(r"\b[A-Z]{2,5}-\d{2,4}\b")
+TERRITORY_ID_PATTERN = re.compile(r"\b(?:[A-Z]{2,5}-\d{2,4}|[A-Z]{1,3}\d{4,8})\b", re.IGNORECASE)
+TERRITORY_CONTEXT_PATTERN = re.compile(
+    r"\b(?:territory(?:\s+id)?(?:\s+code)?)\b[^A-Z0-9]{0,6}([A-Z]{1,5}-?\d{2,8})\b",
+    re.IGNORECASE,
+)
+NON_TERRITORY_PREFIXES = {"DCR", "HCO", "HCP", "NPI", "SP", "ZIP", "IC"}
 PROVIDER_ID_VALUE_PATTERN = re.compile(r"\b(\d{10})\b")
 PROVIDER_REF_PATTERN = re.compile(r"\bdr\.?\s+[A-Za-z'`-]+\b", re.IGNORECASE)
 PROVIDER_NAME_PATTERN = re.compile(
@@ -98,6 +103,7 @@ class ChatResponder:
                     "category": inquiry.category,
                     "field_rep_says": inquiry.field_rep_says,
                     "what_happened": inquiry.what_happened,
+                    "resolution_and_response_to_rep": inquiry.resolution_and_response_to_rep,
                     "datasets_used": inquiry.datasets_used,
                     "score": round(result.score, 4),
                 }
@@ -117,6 +123,7 @@ class ChatResponder:
             "category": inquiry.category,
             "field_rep_says": inquiry.field_rep_says,
             "what_happened": inquiry.what_happened,
+            "resolution_and_response_to_rep": inquiry.resolution_and_response_to_rep,
             "datasets_used": inquiry.datasets_used,
             "score": round(score, 4),
         }
@@ -154,6 +161,44 @@ class ChatResponder:
         return requested
 
     @staticmethod
+    def _is_valid_territory_id(candidate: str) -> bool:
+        value = re.sub(r"[^A-Z0-9-]", "", candidate.upper())
+        if not value or not re.search(r"\d", value):
+            return False
+
+        prefix_match = re.match(r"^([A-Z]+)", value)
+        if not prefix_match:
+            return False
+
+        return prefix_match.group(1) not in NON_TERRITORY_PREFIXES
+
+    @classmethod
+    def _extract_territory_id(cls, text: str) -> str | None:
+        for match in TERRITORY_CONTEXT_PATTERN.finditer(text):
+            candidate = match.group(1).upper()
+            if cls._is_valid_territory_id(candidate):
+                return candidate
+
+        for match in TERRITORY_ID_PATTERN.finditer(text):
+            candidate = match.group(0).upper()
+            if cls._is_valid_territory_id(candidate):
+                return candidate
+
+        return None
+
+    @classmethod
+    def _extract_all_territory_ids(cls, text: str) -> list[str]:
+        territory_ids: list[str] = []
+        for pattern, group in ((TERRITORY_CONTEXT_PATTERN, 1), (TERRITORY_ID_PATTERN, 0)):
+            for match in pattern.finditer(text):
+                candidate = match.group(group).upper()
+                if not cls._is_valid_territory_id(candidate):
+                    continue
+                if candidate not in territory_ids:
+                    territory_ids.append(candidate)
+        return territory_ids
+
+    @staticmethod
     def _message_looks_like_identifier_reply(message: str) -> bool:
         lowered = message.lower()
         return (
@@ -162,7 +207,7 @@ class ChatResponder:
             or "hco" in lowered
             or "territory" in lowered
             or bool(re.search(r"\d", message))
-            or bool(TERRITORY_ID_PATTERN.search(message.upper()))
+            or bool(ChatResponder._extract_territory_id(message))
         )
 
     @staticmethod
@@ -176,12 +221,16 @@ class ChatResponder:
 
     @staticmethod
     def _extract_expected_identifier_values(context: dict[str, Any]) -> dict[str, list[str]]:
-        source = f"{context.get('field_rep_says', '')} {context.get('what_happened', '')}"
+        source = (
+            f"{context.get('field_rep_says', '')} "
+            f"{context.get('what_happened', '')} "
+            f"{context.get('resolution_and_response_to_rep', '')}"
+        )
         provider_ids = re.findall(r"\bNPI\b\s*[:#-]?\s*(\d{10})", source, re.IGNORECASE)
         return {
             "NCP ID": provider_ids,
             "HCO ID": [match.upper() for match in re.findall(r"\bHCO\s+ID\b\s*[:#-]?\s*([A-Z0-9-]+)", source, re.IGNORECASE)],
-            "territory ID": [match.upper() for match in TERRITORY_ID_PATTERN.findall(source.upper())],
+            "territory ID": ChatResponder._extract_all_territory_ids(source),
         }
 
     @staticmethod
@@ -214,16 +263,16 @@ class ChatResponder:
             return (match.group(1).upper() if match else None, attempted)
 
         if identifier_type == "territory ID":
-            match = TERRITORY_ID_PATTERN.search(upper_text)
-            attempted = "territory" in lower_text or bool(match)
-            return (match.group(0).upper() if match else None, attempted)
+            territory_id = ChatResponder._extract_territory_id(upper_text)
+            attempted = "territory" in lower_text or bool(territory_id)
+            return (territory_id, attempted)
 
         return None, False
 
     @staticmethod
     def _query_has_identifier(query: str) -> bool:
         return any(pattern.search(query) for pattern in IDENTIFIER_PATTERNS.values()) or bool(
-            TERRITORY_ID_PATTERN.search(query)
+            ChatResponder._extract_territory_id(query)
         ) or bool(re.search(r"\b(?:NCP(?:\s*ID)?|NPI)\b\s*[:#-]?\s*\d{10}\b", query, re.IGNORECASE)) or bool(
             PROVIDER_ID_VALUE_PATTERN.search(query)
         )
@@ -267,7 +316,7 @@ class ChatResponder:
                 "my geography",
                 "my accounts",
             )
-        ) or "territory" in normalized
+        ) or "territory" in normalized or bool(ChatResponder._extract_territory_id(query))
 
     @staticmethod
     def _query_has_provider_id(query: str) -> bool:
@@ -312,7 +361,7 @@ class ChatResponder:
 
         if (
             self._query_mentions_territory(query)
-            and not TERRITORY_ID_PATTERN.search(query)
+            and not self._extract_territory_id(query)
         ):
             required.append("territory ID")
 
@@ -508,53 +557,95 @@ class ChatResponder:
         generalized = generalized.replace(" .", ".")
         return generalized.strip()
 
-    def _fallback_bullets(self, query: str, context: dict[str, Any], mode: str) -> str:
-        source = str(context.get("what_happened", "")).strip()
+    @staticmethod
+    def _answer_source_text(context: dict[str, Any]) -> str:
+        resolution = str(context.get("resolution_and_response_to_rep", "")).strip()
+        if resolution:
+            return resolution
+        return str(context.get("what_happened", "")).strip()
+
+    def _fallback_response_text(self, query: str, context: dict[str, Any], mode: str) -> str:
+        source = self._answer_source_text(context)
         if not source:
-            return "• No matched playbook explanation is available for this question."
+            return "No matched playbook response is available for this question."
 
         if mode == "full":
-            bullet_items = self._split_sentences(source)
-        elif mode == "vague":
+            return source
+
+        if mode == "vague":
             generalized = self._generalize_text(source)
-            bullet_items = self._split_sentences(generalized)[:3]
-        else:
-            bullet_items = self._select_partial_sentences(query, source)
+            sentences = self._split_sentences(generalized)[:3]
+            return " ".join(sentences).strip()
 
-        return self._format_bullets(bullet_items)
+        selected_sentences = self._select_partial_sentences(query, source)
+        if selected_sentences:
+            return " ".join(selected_sentences).strip()
+        return source
 
-    @staticmethod
-    def _format_bullets(items: list[str]) -> str:
-        bullets: list[str] = []
-        for item in items:
-            cleaned = " ".join(item.replace("•", " ").split())
-            cleaned = re.sub(r"^[-*]\s*", "", cleaned)
-            cleaned = re.sub(r"^\d+\.\s*", "", cleaned)
-            if not cleaned:
-                continue
-            bullets.append(f"• {cleaned}")
-
-        if not bullets:
-            return "• No usable answer was produced from the matched playbook context."
-
-        return "\n".join(bullets)
-
-    def _normalize_bullet_output(self, answer: str) -> str:
-        raw_lines = [line.strip() for line in answer.splitlines() if line.strip()]
+    def _normalize_answer_output(self, answer: str) -> str:
+        raw_lines = [line.rstrip() for line in answer.splitlines()]
         if not raw_lines:
             return ""
 
-        bullet_items: list[str] = []
+        normalized_lines: list[str] = []
         for line in raw_lines:
-            if line.startswith("•"):
-                bullet_items.append(line.lstrip("•").strip())
+            stripped = line.strip()
+            if not stripped:
+                if normalized_lines and normalized_lines[-1] != "":
+                    normalized_lines.append("")
                 continue
-            if line.startswith("-") or re.match(r"^\d+\.", line):
-                bullet_items.append(re.sub(r"^(-|\d+\.)\s*", "", line))
-                continue
-            bullet_items.extend(self._split_sentences(line))
 
-        return self._format_bullets(bullet_items)
+            cleaned = re.sub(r"^(?:•|-|\*|\d+\.)\s*", "", stripped)
+            cleaned = " ".join(cleaned.split())
+            if cleaned:
+                normalized_lines.append(cleaned)
+
+        if not normalized_lines:
+            return ""
+
+        if normalized_lines[-1] == "":
+            normalized_lines.pop()
+
+        paragraphs: list[str] = []
+        current: list[str] = []
+        for line in normalized_lines:
+            if line == "":
+                if current:
+                    paragraphs.append(" ".join(current))
+                    current = []
+                continue
+            current.append(line)
+
+        if current:
+            paragraphs.append(" ".join(current))
+
+        return "\n\n".join(paragraphs)
+
+    @staticmethod
+    def _dataset_reference_line(context: dict[str, Any]) -> str:
+        datasets_raw = context.get("datasets_used", [])
+        if not isinstance(datasets_raw, list):
+            return ""
+
+        datasets: list[str] = []
+        for item in datasets_raw:
+            dataset_name = str(item).strip()
+            if dataset_name and dataset_name not in datasets:
+                datasets.append(dataset_name)
+
+        if not datasets:
+            return ""
+
+        return f"Reference from {', '.join(datasets)}."
+
+    def _append_dataset_reference(self, answer: str, context: dict[str, Any]) -> str:
+        reference_line = self._dataset_reference_line(context)
+        cleaned_answer = answer.strip()
+        if not reference_line:
+            return cleaned_answer
+        if not cleaned_answer:
+            return reference_line
+        return f"{cleaned_answer}\n\n{reference_line}"
 
     def _fallback_answer(
         self,
@@ -578,7 +669,10 @@ class ChatResponder:
         if decision.follow_up:
             response = decision.follow_up
         else:
-            response = self._fallback_bullets(query, best, decision.mode)
+            response = self._append_dataset_reference(
+                self._fallback_response_text(query, best, decision.mode),
+                best,
+            )
 
         return AssistantResult(
             content=response,
@@ -655,29 +749,29 @@ class ChatResponder:
             return fallback
 
         system_prompt = (
-            "You are a strict sales-operations explanation engine. "
-            "Use only the provided `what_happened` context. "
-            "Do not mention or invent any resolution, DCR completion, promised action, or response-to-rep content. "
-            "Do not apologize or use conversational filler. State the reason directly. "
-            "Output only bullet points, and every non-empty line must start with `• `."
+            "You are a sales operations assistant responding directly to a field rep. "
+            "Use only the provided playbook context. "
+            "Prioritize `resolution_and_response_to_rep`; use `what_happened` only to explain root cause. "
+            "Write in a neutral corporate tone, avoid apologies/filler, and do not output bullet points. "
+            "Do not invent facts, timelines, IDs, actions, or outcomes."
         )
 
         user_prompt = (
             f"Question mode: {decision.mode}\n\n"
             "Rep question:\n"
             f"{effective_query}\n\n"
-            "Allowed playbook context (`what_happened` only):\n"
-            f"{context[0]['what_happened']}\n\n"
+            "Resolution context (`resolution_and_response_to_rep`):\n"
+            f"{context[0].get('resolution_and_response_to_rep', '')}\n\n"
+            "Root-cause context (`what_happened`):\n"
+            f"{context[0].get('what_happened', '')}\n\n"
             "OUTPUT RULES:\n"
             "1. Use only the allowed context above.\n"
-            "2. If mode is `full`, answer the full scenario in as many concise bullet points as possible.\n"
-            "3. If mode is `partial`, answer only the specific part asked in the rep question and exclude unrelated facts.\n"
-            "4. If mode is `vague`, give a general answer without names, NPIs, HCO IDs, exact dates, exact ZIP codes, exact addresses, territory codes, ship-to IDs, or exact counts.\n"
-            "5. If specific identifiers in the rep question align with the context, you may refer to the matched provider or account by name.\n"
-            "6. If two facts are tightly related, you may combine them into one bullet.\n"
-            "7. Do not apologize, hedge, or add conversational filler.\n"
-            "8. Do not add any preamble, summary line, or closing sentence outside the bullets.\n"
-            "9. Every line must begin with `• `."
+            "2. If mode is `full`, provide the complete response in concise professional prose.\n"
+            "3. If mode is `partial`, answer only the part asked in the rep question and exclude unrelated details.\n"
+            "4. If mode is `vague`, keep the answer generic and avoid names, NPIs, HCO IDs, exact dates, exact ZIP codes, exact addresses, territory codes, ship-to IDs, and exact counts.\n"
+            "5. If identifiers in the rep question align with context, you may use the matched provider/account names.\n"
+            "6. Keep the answer to 1-3 short paragraphs.\n"
+            "7. Do not add greetings or sign-offs."
         )
 
         answer = self.azure_client.chat_completion(
@@ -692,12 +786,13 @@ class ChatResponder:
         if not answer:
             return fallback
 
-        answer_text = self._normalize_bullet_output(answer.strip())
+        answer_text = self._normalize_answer_output(answer.strip())
         if not answer_text:
             return fallback
 
+        answer_with_reference = self._append_dataset_reference(answer_text, context[0])
         return AssistantResult(
-            content=answer_text,
+            content=answer_with_reference,
             matched_inquiry_id=fallback.matched_inquiry_id,
             matched_title=fallback.matched_title,
             confidence=confidence,
