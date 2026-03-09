@@ -1,0 +1,115 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gilead Field Inquiry Assistant</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap"
+    rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+
+<body>
+  <div class="bg-orb orb-a"></div>
+  <div class="bg-orb orb-b"></div>
+  <div class="bg-grid"></div>
+
+  <div class="app-shell" id="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="sidebar-top">
+        <div class="brand-mark" aria-hidden="true">GI</div>
+        <div class="brand-copy">
+          <h1>Gilead Assistant</h1>
+          <p>Field Inquiry Demo</p>
+        </div>
+        <button class="icon-button" id="collapse-sidebar" title="Collapse sidebar">
+          <span>≡</span>
+        </button>
+      </div>
+
+      <button class="new-chat-btn" id="new-chat-btn" type="button">
+        <span>＋</span>
+        <strong>New Chat</strong>
+      </button>
+
+      <div class="sidebar-section">
+        <div class="section-header">Pinned</div>
+        <div class="chat-list" id="pinned-list"></div>
+      </div>
+
+      <div class="sidebar-section">
+        <div class="section-header">Recent</div>
+        <div class="chat-list" id="recent-list"></div>
+      </div>
+
+      <div class="sidebar-section archived-wrap">
+        <button class="archived-toggle" id="archived-toggle" type="button" aria-expanded="false">
+          Archived Chats
+        </button>
+        <div class="chat-list" id="archived-list" hidden></div>
+      </div>
+    </aside>
+
+    <main class="chat-pane">
+      <header class="chat-header">
+        <div class="left-header">
+          <button class="icon-button mobile-only" id="open-sidebar" title="Open sidebar">
+            <span>☰</span>
+          </button>
+          <div>
+            <h2 id="active-title">New Chat</h2>
+            <p id="status-pill"></p>
+          </div>
+        </div>
+        <div class="header-badge">Azure 4o + RAG</div>
+      </header>
+
+      <section id="message-stream" class="message-stream"></section>
+
+      <footer class="composer-shell">
+        <div class="composer-wrap">
+          <textarea id="chat-input" class="chat-input" placeholder="Ask a field inquiry question..."
+            rows="1"></textarea>
+          <button id="send-btn" class="send-btn" type="button">
+            <span>Send</span>
+          </button>
+        </div>
+        <div class="composer-note">Enter to send, Shift + Enter for new line</div>
+      </footer>
+    </main>
+  </div>
+
+  <div id="context-menu" class="context-menu" hidden>
+    <button type="button" data-action="pin">Pin Chat</button>
+    <button type="button" data-action="rename">Rename</button>
+    <button type="button" data-action="archive">Archive</button>
+    <button type="button" data-action="delete" class="danger">Delete</button>
+  </div>
+
+  <div id="rename-modal" class="modal-backdrop" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="rename-title">
+      <h3 id="rename-title">Rename Chat</h3>
+      <input id="rename-input" type="text" maxlength="80" />
+      <div class="modal-actions">
+        <button type="button" id="rename-cancel">Cancel</button>
+        <button type="button" id="rename-save" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <template id="typing-template">
+    <div class="message-row assistant">
+      <div class="bubble assistant-bubble loading-bubble">
+        <div class="loading-bars"><span></span><span></span><span></span><span></span></div>
+      </div>
+    </div>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+
+</html>

@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+chat/chat_history.db
+chat/embedding_cache.json
+.env
+config/.env
