@@ -103,7 +103,6 @@ class ChatResponder:
                     "category": inquiry.category,
                     "field_rep_says": inquiry.field_rep_says,
                     "what_happened": inquiry.what_happened,
-                    "resolution_and_response_to_rep": inquiry.resolution_and_response_to_rep,
                     "datasets_used": inquiry.datasets_used,
                     "score": round(result.score, 4),
                 }
@@ -123,7 +122,6 @@ class ChatResponder:
             "category": inquiry.category,
             "field_rep_says": inquiry.field_rep_says,
             "what_happened": inquiry.what_happened,
-            "resolution_and_response_to_rep": inquiry.resolution_and_response_to_rep,
             "datasets_used": inquiry.datasets_used,
             "score": round(score, 4),
         }
@@ -221,11 +219,7 @@ class ChatResponder:
 
     @staticmethod
     def _extract_expected_identifier_values(context: dict[str, Any]) -> dict[str, list[str]]:
-        source = (
-            f"{context.get('field_rep_says', '')} "
-            f"{context.get('what_happened', '')} "
-            f"{context.get('resolution_and_response_to_rep', '')}"
-        )
+        source = f"{context.get('field_rep_says', '')} {context.get('what_happened', '')}"
         provider_ids = re.findall(r"\bNPI\b\s*[:#-]?\s*(\d{10})", source, re.IGNORECASE)
         return {
             "NCP ID": provider_ids,
@@ -559,67 +553,55 @@ class ChatResponder:
 
     @staticmethod
     def _answer_source_text(context: dict[str, Any]) -> str:
-        resolution = str(context.get("resolution_and_response_to_rep", "")).strip()
-        if resolution:
-            return resolution
         return str(context.get("what_happened", "")).strip()
 
-    def _fallback_response_text(self, query: str, context: dict[str, Any], mode: str) -> str:
+    def _fallback_bullets(self, query: str, context: dict[str, Any], mode: str) -> str:
         source = self._answer_source_text(context)
         if not source:
-            return "No matched playbook response is available for this question."
+            return "• No matched playbook explanation is available for this question."
 
         if mode == "full":
-            return source
-
-        if mode == "vague":
+            bullet_items = self._split_sentences(source)
+        elif mode == "vague":
             generalized = self._generalize_text(source)
-            sentences = self._split_sentences(generalized)[:3]
-            return " ".join(sentences).strip()
+            bullet_items = self._split_sentences(generalized)[:3]
+        else:
+            bullet_items = self._select_partial_sentences(query, source)
 
-        selected_sentences = self._select_partial_sentences(query, source)
-        if selected_sentences:
-            return " ".join(selected_sentences).strip()
-        return source
+        return self._format_bullets(bullet_items)
 
-    def _normalize_answer_output(self, answer: str) -> str:
-        raw_lines = [line.rstrip() for line in answer.splitlines()]
+    @staticmethod
+    def _format_bullets(items: list[str]) -> str:
+        bullets: list[str] = []
+        for item in items:
+            cleaned = " ".join(item.replace("•", " ").split())
+            cleaned = re.sub(r"^[-*]\s*", "", cleaned)
+            cleaned = re.sub(r"^\d+\.\s*", "", cleaned)
+            if not cleaned:
+                continue
+            bullets.append(f"• {cleaned}")
+
+        if not bullets:
+            return "• No usable answer was produced from the matched playbook context."
+
+        return "\n".join(bullets)
+
+    def _normalize_bullet_output(self, answer: str) -> str:
+        raw_lines = [line.strip() for line in answer.splitlines() if line.strip()]
         if not raw_lines:
             return ""
 
-        normalized_lines: list[str] = []
+        bullet_items: list[str] = []
         for line in raw_lines:
-            stripped = line.strip()
-            if not stripped:
-                if normalized_lines and normalized_lines[-1] != "":
-                    normalized_lines.append("")
+            if line.startswith("•"):
+                bullet_items.append(line.lstrip("•").strip())
                 continue
-
-            cleaned = re.sub(r"^(?:•|-|\*|\d+\.)\s*", "", stripped)
-            cleaned = " ".join(cleaned.split())
-            if cleaned:
-                normalized_lines.append(cleaned)
-
-        if not normalized_lines:
-            return ""
-
-        if normalized_lines[-1] == "":
-            normalized_lines.pop()
-
-        paragraphs: list[str] = []
-        current: list[str] = []
-        for line in normalized_lines:
-            if line == "":
-                if current:
-                    paragraphs.append(" ".join(current))
-                    current = []
+            if line.startswith("-") or re.match(r"^\d+\.", line):
+                bullet_items.append(re.sub(r"^(-|\d+\.)\s*", "", line))
                 continue
-            current.append(line)
+            bullet_items.extend(self._split_sentences(line))
 
-        if current:
-            paragraphs.append(" ".join(current))
-
-        return "\n\n".join(paragraphs)
+        return self._format_bullets(bullet_items)
 
     @staticmethod
     def _dataset_reference_line(context: dict[str, Any]) -> str:
@@ -670,7 +652,7 @@ class ChatResponder:
             response = decision.follow_up
         else:
             response = self._append_dataset_reference(
-                self._fallback_response_text(query, best, decision.mode),
+                self._fallback_bullets(query, best, decision.mode),
                 best,
             )
 
@@ -749,29 +731,30 @@ class ChatResponder:
             return fallback
 
         system_prompt = (
-            "You are a sales operations assistant responding directly to a field rep. "
-            "Use only the provided playbook context. "
-            "Prioritize `resolution_and_response_to_rep`; use `what_happened` only to explain root cause. "
-            "Write in a neutral corporate tone, avoid apologies/filler, and do not output bullet points. "
-            "Do not invent facts, timelines, IDs, actions, or outcomes."
+            "You are a strict sales-operations explanation engine. "
+            "Use only the provided `what_happened` context. "
+            "Do not mention or use any resolution field. "
+            "Do not invent facts, timelines, IDs, actions, or outcomes. "
+            "Do not apologize or use conversational filler. State the reason directly. "
+            "Output only bullet points, and every non-empty line must start with `• `."
         )
 
         user_prompt = (
             f"Question mode: {decision.mode}\n\n"
             "Rep question:\n"
             f"{effective_query}\n\n"
-            "Resolution context (`resolution_and_response_to_rep`):\n"
-            f"{context[0].get('resolution_and_response_to_rep', '')}\n\n"
-            "Root-cause context (`what_happened`):\n"
-            f"{context[0].get('what_happened', '')}\n\n"
+            "Allowed playbook context (`what_happened` only):\n"
+            f"{context[0]['what_happened']}\n\n"
             "OUTPUT RULES:\n"
             "1. Use only the allowed context above.\n"
-            "2. If mode is `full`, provide the complete response in concise professional prose.\n"
-            "3. If mode is `partial`, answer only the part asked in the rep question and exclude unrelated details.\n"
-            "4. If mode is `vague`, keep the answer generic and avoid names, NPIs, HCO IDs, exact dates, exact ZIP codes, exact addresses, territory codes, ship-to IDs, and exact counts.\n"
-            "5. If identifiers in the rep question align with context, you may use the matched provider/account names.\n"
-            "6. Keep the answer to 1-3 short paragraphs.\n"
-            "7. Do not add greetings or sign-offs."
+            "2. If mode is `full`, answer the full scenario in as many sensible concise bullet points as possible.\n"
+            "3. If mode is `partial`, answer only the specific part asked in the rep question and exclude unrelated facts.\n"
+            "4. If mode is `vague`, give a general answer without names, NPIs, HCO IDs, exact dates, exact ZIP codes, exact addresses, territory codes, ship-to IDs, or exact counts.\n"
+            "5. If specific identifiers in the rep question align with the context, you may refer to the matched provider or account by name.\n"
+            "6. Split complex facts into separate bullets where useful.\n"
+            "7. Do not apologize, hedge, or add conversational filler.\n"
+            "8. Do not add any preamble or closing sentence outside the bullets.\n"
+            "9. Every line must begin with `• `."
         )
 
         answer = self.azure_client.chat_completion(
@@ -786,7 +769,7 @@ class ChatResponder:
         if not answer:
             return fallback
 
-        answer_text = self._normalize_answer_output(answer.strip())
+        answer_text = self._normalize_bullet_output(answer.strip())
         if not answer_text:
             return fallback
 
