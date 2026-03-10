@@ -1,4 +1,4 @@
-﻿const state = {
+const state = {
   chats: [],
   activeChatId: null,
   sending: false,
@@ -214,8 +214,8 @@ function openContextMenu(chatId, trigger) {
 function renderEmptyState() {
   dom.stream.innerHTML = `
     <div class="empty-state">
-      <h3>Hello, I am your Gilead Assistant</h3>
-      <p>How can I help you today? Ask me any field inquiry questions to get started.</p>
+      <h3>Hello, I am your Field Inquiry Assistant</h3>
+      <p>How can I help you today? Ask me any field questions to get started.</p>
     </div>
   `;
 }

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 from pathlib import Path
@@ -137,6 +137,7 @@ def send_message(chat_id: str, payload: SendMessageRequest) -> dict:
     assistant_result = responder.generate_answer(
         user_message=content,
         conversation_history=history,
+        chat_id=chat_id,
     )
 
     metadata = {

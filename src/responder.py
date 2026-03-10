@@ -1,5 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -693,6 +694,74 @@ class ChatResponder:
         re.IGNORECASE | re.DOTALL,
     )
 
+    _DCR_PROMPT_PATTERN = re.compile(
+        r"Would you like me to (?:submit|raise|file|create|log)",
+        re.IGNORECASE,
+    )
+
+    _AFFIRMATIVE_PATTERN = re.compile(
+        r"^\s*(?:yes|yeah|yep|yup|sure|go ahead|please|do it|submit|raise|generate|create|file|ok|okay|absolutely|definitely|please do|yes please|ya|y)\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_dcr_confirmation(cls, user_message: str, last_assistant_content: str) -> bool:
+        if not cls._DCR_PROMPT_PATTERN.search(last_assistant_content):
+            return False
+        return bool(cls._AFFIRMATIVE_PATTERN.match(user_message.strip()))
+
+    @classmethod
+    def _generate_dcr_number(cls, chat_context: str) -> str:
+        digest = hashlib.md5(chat_context.encode()).hexdigest()
+        numeric = int(digest[:4], 16) % 9000 + 1000
+        return f"DCR-2025-{numeric}"
+
+    @classmethod
+    def _build_dcr_confirmation(cls, last_assistant_content: str, inquiry_context: dict[str, Any] | None, chat_context: str) -> str:
+        dcr_number = cls._generate_dcr_number(chat_context)
+
+        lower = last_assistant_content.lower()
+        if "territory" in lower and ("exception" in lower or "alignment" in lower):
+            dcr_type = "Territory Alignment Exception Request"
+        elif "merge" in lower or "consolidat" in lower:
+            dcr_type = "Record Merge Request"
+        elif "retroactive" in lower and "credit" in lower:
+            dcr_type = "Retroactive Credit Correction Request"
+        elif "onboarding" in lower:
+            dcr_type = "HCP Onboarding Request"
+        elif "deactivat" in lower:
+            dcr_type = "Deactivation and Reallocation Request"
+        elif "340b" in lower:
+            dcr_type = "340B Exclusion Flag Activation Request"
+        elif "co-promot" in lower or "co-promote" in lower:
+            dcr_type = "Co-Promotion Flag Activation Request"
+        elif "mapping" in lower and ("ship" in lower or "867" in lower or "pharmacy" in lower):
+            dcr_type = "Distributor Feed Mapping Correction Request"
+        elif "dnc" in lower or "do not contact" in lower or "contact restriction" in lower:
+            dcr_type = "Contact Restriction Scoping Request"
+        else:
+            dcr_type = "Data Correction Request (DCR)"
+
+        title = ""
+        if inquiry_context:
+            title = str(inquiry_context.get("title", ""))
+
+        lines = [
+            f"A {dcr_type} #{dcr_number} has been submitted successfully.",
+            "",
+            "**Submission Details**",
+        ]
+        if title:
+            lines.append(f"• Issue: {title}")
+        lines.append(f"• Request Type: {dcr_type}")
+        lines.append(f"• Reference ID: {dcr_number}")
+        lines.append("• Status: Submitted - Pending Review")
+        lines.append("• Assigned To: Data Governance Team")
+        lines.append("")
+        lines.append("The Data Governance team will review and process this request. You will receive a notification once a resolution has been applied. Typical turnaround time is 3-5 business days.")
+
+        return "\n".join(lines)
+
     @classmethod
     def _detect_dcr_action(cls, resolution_text: str) -> str | None:
         if not resolution_text:
@@ -758,7 +827,36 @@ class ChatResponder:
         self,
         user_message: str,
         conversation_history: list[dict[str, Any]] | None = None,
+        chat_id: str | None = None,
     ) -> AssistantResult:
+        # --- DCR confirmation flow ---
+        if conversation_history:
+            last_assistant = None
+            last_assistant_metadata = None
+            for msg in reversed(conversation_history):
+                if msg.get("role") == "assistant":
+                    last_assistant = msg
+                    last_assistant_metadata = msg.get("metadata") or {}
+                    break
+
+            if last_assistant and self._is_dcr_confirmation(
+                user_message, str(last_assistant.get("content", ""))
+            ):
+                inquiry_id = str(last_assistant_metadata.get("matched_inquiry_id", "")) if last_assistant_metadata else ""
+                inquiry_context = self._context_from_inquiry_id(inquiry_id) if inquiry_id else None
+                dcr_seed = chat_id or inquiry_id or "default"
+                dcr_response = self._build_dcr_confirmation(
+                    str(last_assistant.get("content", "")),
+                    inquiry_context,
+                    dcr_seed,
+                )
+                return AssistantResult(
+                    content=dcr_response,
+                    matched_inquiry_id=inquiry_id or None,
+                    matched_title=str(inquiry_context.get("title", "")) if inquiry_context else None,
+                    confidence=float(last_assistant_metadata.get("confidence") or 1.0) if last_assistant_metadata else 1.0,
+                )
+
         follow_up_state = self._resolve_follow_up_state(user_message, conversation_history)
 
         if follow_up_state is not None:
