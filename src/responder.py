@@ -104,6 +104,7 @@ class ChatResponder:
                     "field_rep_says": inquiry.field_rep_says,
                     "what_happened": inquiry.what_happened,
                     "datasets_used": inquiry.datasets_used,
+                    "resolution_and_response_to_rep": inquiry.resolution_and_response_to_rep,
                     "score": round(result.score, 4),
                 }
             )
@@ -123,6 +124,7 @@ class ChatResponder:
             "field_rep_says": inquiry.field_rep_says,
             "what_happened": inquiry.what_happened,
             "datasets_used": inquiry.datasets_used,
+            "resolution_and_response_to_rep": inquiry.resolution_and_response_to_rep,
             "score": round(score, 4),
         }
 
@@ -151,7 +153,7 @@ class ChatResponder:
         lowered = content.lower()
         requested: list[str] = []
         if "npi" in lowered or "ncp id" in lowered:
-            requested.append("NCP ID")
+            requested.append("NPI ID")
         if "hco id" in lowered:
             requested.append("HCO ID")
         if "territory id" in lowered:
@@ -222,7 +224,7 @@ class ChatResponder:
         source = f"{context.get('field_rep_says', '')} {context.get('what_happened', '')}"
         provider_ids = re.findall(r"\bNPI\b\s*[:#-]?\s*(\d{10})", source, re.IGNORECASE)
         return {
-            "NCP ID": provider_ids,
+            "NPI ID": provider_ids,
             "HCO ID": [match.upper() for match in re.findall(r"\bHCO\s+ID\b\s*[:#-]?\s*([A-Z0-9-]+)", source, re.IGNORECASE)],
             "territory ID": ChatResponder._extract_all_territory_ids(source),
         }
@@ -232,7 +234,7 @@ class ChatResponder:
         upper_text = text.upper()
         lower_text = text.lower()
 
-        if identifier_type == "NCP ID":
+        if identifier_type == "NPI ID":
             match = re.search(r"\b(?:NPI|NCP(?:\s*ID)?)\s*[:#-]?\s*(\d{10})\b", text, re.IGNORECASE)
             if match is None:
                 value_match = PROVIDER_ID_VALUE_PATTERN.search(text)
@@ -348,7 +350,7 @@ class ChatResponder:
         available_identifiers = self._extract_identifiers(what_happened)
 
         if "NPI" in available_identifiers and self._query_mentions_provider(query, context) and not self._query_has_provider_id(query):
-            required.append("NCP ID")
+            required.append("NPI ID")
 
         if "HCO ID" in available_identifiers and not IDENTIFIER_PATTERNS["HCO ID"].search(query):
             required.append("HCO ID")
@@ -401,7 +403,7 @@ class ChatResponder:
                 invalid.append(identifier_type)
                 continue
 
-            validated[identifier_type] = value if identifier_type == "NCP ID" else value.upper()
+            validated[identifier_type] = value if identifier_type == "NPI ID" else value.upper()
 
         if invalid:
             return {}, self._format_identifier_follow_up(invalid, correct=True)
@@ -586,6 +588,62 @@ class ChatResponder:
 
         return "\n".join(bullets)
 
+    _SECTION_HEADERS = {
+        "summary", "key findings", "root cause", "root cause / issue analysis",
+        "issue analysis", "data sources", "next steps",
+    }
+
+    _SKIP_SECTIONS = {
+        "business impact", "recommended action", "recommended actions",
+    }
+
+    def _normalize_structured_output(self, answer: str) -> str:
+        raw_lines = [line.strip() for line in answer.splitlines() if line.strip()]
+        if not raw_lines:
+            return ""
+
+        output_lines: list[str] = []
+        skip_mode = False
+        for line in raw_lines:
+            stripped = re.sub(r"^#+\s*", "", line).rstrip(":")
+            stripped_lower = stripped.lower()
+
+            # Check if this header should be skipped entirely
+            if stripped_lower in self._SKIP_SECTIONS:
+                skip_mode = True
+                continue
+            if line.startswith("**") and line.endswith("**"):
+                inner = line.strip("*").strip().rstrip(":")
+                if inner.lower() in self._SKIP_SECTIONS:
+                    skip_mode = True
+                    continue
+
+            # Recognise kept section headers — stop skipping
+            if stripped_lower in self._SECTION_HEADERS:
+                skip_mode = False
+                output_lines.append(f"**{stripped}**")
+                continue
+            if line.startswith("**") and line.endswith("**"):
+                inner = line.strip("*").strip().rstrip(":")
+                if inner.lower() in self._SECTION_HEADERS:
+                    skip_mode = False
+                    output_lines.append(f"**{inner}**")
+                    continue
+
+            if skip_mode:
+                continue
+
+            if line.startswith("•"):
+                output_lines.append(line)
+                continue
+            if line.startswith("-") or re.match(r"^\d+\.", line):
+                cleaned = re.sub(r"^(-|\d+\.)\s*", "", line)
+                output_lines.append(f"• {cleaned}")
+                continue
+            output_lines.append(line)
+
+        return "\n".join(output_lines)
+
     def _normalize_bullet_output(self, answer: str) -> str:
         raw_lines = [line.strip() for line in answer.splitlines() if line.strip()]
         if not raw_lines:
@@ -629,6 +687,39 @@ class ChatResponder:
             return reference_line
         return f"{cleaned_answer}\n\n{reference_line}"
 
+    _DCR_PATTERNS = re.compile(
+        r"(?:DCR|correction request|exception request|onboarding request|mapping DCR|merge DCR|flag|submitted)"
+        r".*?(?:has been submitted|was submitted|submitted to|has been logged|will be)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
+    @classmethod
+    def _detect_dcr_action(cls, resolution_text: str) -> str | None:
+        if not resolution_text:
+            return None
+        if cls._DCR_PATTERNS.search(resolution_text):
+            lower = resolution_text.lower()
+            if "territory exception" in lower or "alignment exception" in lower:
+                return "Would you like me to submit a territory alignment exception request for this case?"
+            if "merge dcr" in lower or "consolidat" in lower:
+                return "Would you like me to submit a record merge request to resolve this?"
+            if "retroactive" in lower and "credit" in lower:
+                return "Would you like me to submit a retroactive credit correction request?"
+            if "onboarding" in lower:
+                return "Would you like me to submit an HCP onboarding request for this provider?"
+            if "deactivat" in lower:
+                return "Would you like me to submit a deactivation and reallocation request?"
+            if "340b" in lower:
+                return "Would you like me to submit a 340B exclusion flag activation request?"
+            if "co-promot" in lower or "co-promote" in lower:
+                return "Would you like me to submit a co-promotion flag activation request?"
+            if "mapping" in lower and ("ship" in lower or "867" in lower or "pharmacy" in lower):
+                return "Would you like me to submit a distributor feed mapping correction request?"
+            if "dnc" in lower or "do not contact" in lower or "do-not-contact" in lower:
+                return "Would you like me to submit a request to scope the contact restriction?"
+            return "Would you like me to submit a data correction request (DCR) for this issue?"
+        return None
+
     def _fallback_answer(
         self,
         query: str,
@@ -639,7 +730,7 @@ class ChatResponder:
         if not context:
             return AssistantResult(
                 content=(
-                    "Please provide the provider NCP ID, HCO ID, or territory ID, plus the exact issue, so the "
+                    "Please provide the provider NPI ID, HCO ID, or territory ID, plus the exact issue, so the "
                     "correct playbook scenario can be matched."
                 ),
                 matched_inquiry_id=None,
@@ -731,12 +822,12 @@ class ChatResponder:
             return fallback
 
         system_prompt = (
-            "You are a strict sales-operations explanation engine. "
+            "You are an enterprise CRM support analyst. "
             "Use only the provided `what_happened` context. "
             "Do not mention or use any resolution field. "
             "Do not invent facts, timelines, IDs, actions, or outcomes. "
             "Do not apologize or use conversational filler. State the reason directly. "
-            "Output only bullet points, and every non-empty line must start with `• `."
+            "Maintain a professional tone suitable for an enterprise CRM support tool."
         )
 
         user_prompt = (
@@ -745,16 +836,24 @@ class ChatResponder:
             f"{effective_query}\n\n"
             "Allowed playbook context (`what_happened` only):\n"
             f"{context[0]['what_happened']}\n\n"
-            "OUTPUT RULES:\n"
+            "OUTPUT FORMAT (strictly follow this structure):\n"
+            "1. Start with a 1-2 sentence Summary (plain text, no header, no bullet).\n"
+            "2. Then output the following sections as headers (use the exact header text on its own line, no markdown hashes):\n"
+            "   Key Findings\n"
+            "   Root Cause / Issue Analysis\n"
+            "3. Under each section header, use concise bullet points starting with `• `. One insight per bullet.\n"
+            "4. Highlight important counts, entities, and identifiers (e.g., ZIP codes, HCP counts, NPI numbers).\n"
+            "5. Italicize all references to data sources, systems, and datasets by wrapping them in underscores: _dataset name_.\n"
+            "6. Omit any section that has no relevant content for this scenario.\n"
+            "7. Do NOT include Business Impact or Recommended Action sections.\n\n"
+            "CONTENT RULES:\n"
             "1. Use only the allowed context above.\n"
-            "2. If mode is `full`, answer the full scenario in as many sensible concise bullet points as possible.\n"
-            "3. If mode is `partial`, answer only the specific part asked in the rep question and exclude unrelated facts.\n"
+            "2. If mode is `full`, cover the full scenario across all applicable sections.\n"
+            "3. If mode is `partial`, answer only the specific part asked and include only the relevant sections.\n"
             "4. If mode is `vague`, give a general answer without names, NPIs, HCO IDs, exact dates, exact ZIP codes, exact addresses, territory codes, ship-to IDs, or exact counts.\n"
             "5. If specific identifiers in the rep question align with the context, you may refer to the matched provider or account by name.\n"
-            "6. Split complex facts into separate bullets where useful.\n"
-            "7. Do not apologize, hedge, or add conversational filler.\n"
-            "8. Do not add any preamble or closing sentence outside the bullets.\n"
-            "9. Every line must begin with `• `."
+            "6. Do not apologize, hedge, or add conversational filler.\n"
+            "7. Do NOT add a Data Sources or Recommended Action section - those will be appended separately."
         )
 
         answer = self.azure_client.chat_completion(
@@ -763,19 +862,29 @@ class ChatResponder:
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.1,
-            max_tokens=700,
+            max_tokens=900,
         )
 
         if not answer:
             return fallback
 
-        answer_text = self._normalize_bullet_output(answer.strip())
+        answer_text = self._normalize_structured_output(answer.strip())
         if not answer_text:
             return fallback
 
-        answer_with_reference = self._append_dataset_reference(answer_text, context[0])
+        # Detect if a DCR or action request should be suggested
+        resolution_text = str(context[0].get("resolution_and_response_to_rep", ""))
+        dcr_prompt = self._detect_dcr_action(resolution_text)
+
+        # Build final output: answer → DCR prompt → references (references always last)
+        final_parts = [answer_text]
+        if dcr_prompt:
+            final_parts.append(f"**Recommended Action**\n{dcr_prompt}")
+        final_text = "\n\n".join(final_parts)
+        final_with_reference = self._append_dataset_reference(final_text, context[0])
+
         return AssistantResult(
-            content=answer_with_reference,
+            content=final_with_reference,
             matched_inquiry_id=fallback.matched_inquiry_id,
             matched_title=fallback.matched_title,
             confidence=confidence,

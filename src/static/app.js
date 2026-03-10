@@ -6,6 +6,10 @@
   archivedExpanded: false,
   renameChatId: null,
 };
+const LOADING_PHASES = [
+  { label: "Analyzing your query", durationMs: 2000 },
+  { label: "Formulating a Response", durationMs: 2000 },
+];
 
 const dom = {
   appShell: document.getElementById("app-shell"),
@@ -60,6 +64,58 @@ function escapeHtml(text) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function delay(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function formatMessageContent(message) {
+  const escaped = escapeHtml(String(message.content || ""));
+
+  if (message.role !== "assistant") {
+    return escaped.replace(/\n/g, "<br>");
+  }
+
+  let formatted = escaped;
+
+  // Bold section headers: **Header Text**
+  formatted = formatted.replace(
+    /\*\*([^*]+)\*\*/g,
+    '<strong style="display:block;margin-top:10px;margin-bottom:2px;font-size:0.92rem;">$1</strong>',
+  );
+
+  // Italic dataset/system references: _text_ (but not __double__)
+  formatted = formatted.replace(
+    /(?<!\w)_([^_]+?)_(?!\w)/g,
+    "<em>$1</em>",
+  );
+
+  // Reference line styling (at the end of the message)
+  formatted = formatted.replace(
+    /(^|\n)(Reference(?:s)?\s+from[^\n]*)/gim,
+    (_, prefix, referenceLine) =>
+      `${prefix}<span class="meta-line"><em>${referenceLine}</em></span>`,
+  );
+
+  // "Would you like me to..." action prompt
+  formatted = formatted.replace(
+    /(^|\n)(Would you like me to[^\n]*)/gim,
+    (_, prefix, actionLine) =>
+      `${prefix}<span style="display:block;margin-top:4px;font-style:italic;color:#3B1018;">${actionLine}</span>`,
+  );
+
+  let html = formatted.replace(/\n/g, "<br>");
+
+  // Collapse extra <br> around block-level elements (headings & action prompts)
+  html = html.replace(/(<br>)+\s*(<strong\b)/gi, "$2");
+  html = html.replace(/(<\/strong>)\s*(<br>)+/gi, "$1");
+  html = html.replace(/(<br>)+\s*(<span\b[^>]*display:\s*block)/gi, "$2");
+  html = html.replace(/(<\/span>)\s*(<br>)+/gi, "$1");
+  // Clean leading <br>
+  html = html.replace(/^(<br>)+/, "");
+
+  return html;
 }
 
 function relativeTime(isoValue) {
@@ -165,14 +221,12 @@ function renderEmptyState() {
 }
 
 function messageMarkup(message) {
-  const assistantMeta = "";
-
   const bubbleClass = message.role === "user" ? "user-bubble" : "assistant-bubble";
   const rowClass = message.role === "user" ? "user" : "assistant";
 
   return `
     <div class="message-row ${rowClass}">
-      <div class="bubble ${bubbleClass}">${escapeHtml(message.content)}${assistantMeta}</div>
+      <div class="bubble ${bubbleClass}">${formatMessageContent(message)}</div>
     </div>
   `;
 }
@@ -207,6 +261,77 @@ function appendTypingBubble() {
   dom.stream.appendChild(node);
   dom.stream.scrollTop = dom.stream.scrollHeight;
   return node;
+}
+
+function startLoadingSequence(typingNode) {
+  const inlineTextElement = typingNode.querySelector("[data-loading-inline-text]");
+  const loadingBubble = typingNode.querySelector(".loading-bubble");
+  let stopped = false;
+
+  const setStage = (label, index) => {
+    if (stopped) return;
+
+    const applyChange = () => {
+      if (inlineTextElement) {
+        inlineTextElement.textContent = label;
+      }
+      if (loadingBubble) {
+        loadingBubble.dataset.phase = String(index);
+      }
+    };
+
+    /* First phase: just fade in */
+    if (index === 0) {
+      applyChange();
+      if (inlineTextElement) {
+        inlineTextElement.style.transition = "none";
+        inlineTextElement.style.opacity = "0";
+        inlineTextElement.style.transform = "translateY(4px)";
+        window.requestAnimationFrame(() => {
+          inlineTextElement.style.transition = "opacity 350ms ease, transform 350ms ease";
+          inlineTextElement.style.opacity = "1";
+          inlineTextElement.style.transform = "translateY(0)";
+        });
+      }
+      return;
+    }
+
+    /* Subsequent phases: fade out → swap → fade in */
+    if (inlineTextElement) {
+      inlineTextElement.style.transition = "opacity 250ms ease, transform 250ms ease";
+      inlineTextElement.style.opacity = "0";
+      inlineTextElement.style.transform = "translateY(-4px)";
+    }
+
+    window.setTimeout(() => {
+      if (stopped) return;
+      applyChange();
+      if (inlineTextElement) {
+        inlineTextElement.style.transition = "none";
+        inlineTextElement.style.transform = "translateY(4px)";
+        window.requestAnimationFrame(() => {
+          inlineTextElement.style.transition = "opacity 350ms ease, transform 350ms ease";
+          inlineTextElement.style.opacity = "1";
+          inlineTextElement.style.transform = "translateY(0)";
+        });
+      }
+    }, 260);
+  };
+
+  const minimumDelayPromise = (async () => {
+    for (let index = 0; index < LOADING_PHASES.length; index += 1) {
+      const phase = LOADING_PHASES[index];
+      setStage(phase.label, index);
+      await delay(phase.durationMs);
+    }
+  })();
+
+  return {
+    minimumDelayPromise,
+    stop() {
+      stopped = true;
+    },
+  };
 }
 
 async function loadChats() {
@@ -294,12 +419,16 @@ async function sendMessage() {
 
   appendUserMessage(content);
   const typingNode = appendTypingBubble();
+  const loadingSequence = startLoadingSequence(typingNode);
 
   try {
-    const payload = await api(`/api/chats/${state.activeChatId}/messages`, {
-      method: "POST",
-      body: JSON.stringify({ content }),
-    });
+    const [payload] = await Promise.all([
+      api(`/api/chats/${state.activeChatId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ content }),
+      }),
+      loadingSequence.minimumDelayPromise,
+    ]);
 
     typingNode.remove();
     await loadChats();
@@ -311,6 +440,7 @@ async function sendMessage() {
     const messages = await api(`/api/chats/${state.activeChatId}/messages`);
     renderMessages(messages);
   } catch (error) {
+    loadingSequence.stop();
     typingNode.remove();
     appendErrorMessage(`Error: ${error.message}`);
   } finally {
@@ -499,3 +629,4 @@ init().catch((error) => {
   renderEmptyState();
   appendErrorMessage(`Startup error: ${error.message}`);
 });
+

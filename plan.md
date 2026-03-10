@@ -68,3 +68,39 @@
 - Do not send `resolution_and_response_to_rep` to the LLM.
 - Do not expose specific identifiers in vague-mode answers.
 - Do not answer an ambiguous name-only query when the matched scenario already contains an `NPI` or `HCO ID` that should be used to confirm identity.
+
+---
+
+## UI Changes (March 2026)
+
+### 1. Color Scheme: Navy Blue → ProcDNA Red
+- Replaced all navy-blue CSS variables and hard-coded hex values with ProcDNA-red equivalents (`#C41E3A` primary).
+- Background gradient, sidebar, brand mark, buttons, user bubbles, badges, scrollbar, modals — all now use red-to-white gradients.
+- Files changed: `src/static/styles.css`
+
+### 2. Two-Phase Loading Animation Before Responses
+- Before showing a response, display two loading stages in sequence with 2-second delays each:
+  1. "Analyzing your query" (2 s)
+  2. "Formulating a Response" (2 s)
+- Displayed as compact inline: `(Formulating a Response iillllii)` with animated bars.
+- Smooth crossfade transition between phases.
+- Files changed: `src/static/styles.css` (new `.loading-stack`, `.loading-stage`, `.loading-inline`, `.loading-bars.compact` styles), `src/static/app.js` (sequence logic already present), `src/static/index.html` (template already present)
+
+### 3. Italic Reference Lines
+- "Reference from ..." lines in assistant messages are rendered in italics using `<em>` tags.
+- Files changed: `src/static/app.js` (`formatMessageContent` already wraps reference lines)
+
+### 4. Lighter Red Color Scheme (Phase 2)
+- Lightened the entire red palette to match the ProcDNA reference UI — moved from dark maroon (`#2A0A0F`) to brighter crimson (`#9B1B30`, `#B91C2C`).
+- Files changed: `src/static/styles.css`
+
+### 5. Structured LLM Response Format (Phase 2)
+- Responses now use a sectioned format: Summary → Key Findings → Root Cause / Issue Analysis → Business Impact → Recommended Action → Data Sources.
+- Data sources, systems, and datasets are italicized.
+- "Would you like me to..." action prompts are appended when DCR/request actions are detected in the resolution data.
+- `resolution_and_response_to_rep` is used only for DCR action detection, not for formulating the main response.
+- Files changed: `src/responder.py`, `src/static/app.js`
+
+### 6. NCP ID → NPI ID Rename (Phase 2)
+- All user-facing strings changed from `NCP ID` to `NPI ID`.
+- Files changed: `src/responder.py`
