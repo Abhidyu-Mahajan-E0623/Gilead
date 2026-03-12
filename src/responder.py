@@ -25,6 +25,10 @@ PROVIDER_REF_PATTERN = re.compile(r"\bdr\.?\s+[A-Za-z'`-]+\b", re.IGNORECASE)
 PROVIDER_NAME_PATTERN = re.compile(
     r"\bDr\.?\s+([A-Z][A-Za-z'`-]+(?:\s+[A-Z][A-Za-z'`-]+)+)"
 )
+PROVIDER_NAME_WITH_NPI_PATTERN = re.compile(
+    r"\bDr\.?\s+([A-Z][A-Za-z'`-]+(?:\s+[A-Z][A-Za-z'`-]+)*)\s*\(NPI\b[^0-9]{0,8}(\d{10})",
+    re.IGNORECASE,
+)
 ACCOUNT_NAME_PATTERN = re.compile(
     r"\b([A-Z][A-Za-z0-9&'.-]+(?:\s+[A-Z][A-Za-z0-9&'.-]+){1,5})\s+\(HCO\s+ID\b"
 )
@@ -150,16 +154,35 @@ class ChatResponder:
         return identifiers
 
     @staticmethod
+    def _identifier_source_text(context: dict[str, Any]) -> str:
+        parts = [
+            str(context.get("field_rep_says", "")).strip(),
+            str(context.get("what_happened", "")).strip(),
+            str(context.get("resolution_and_response_to_rep", "")).strip(),
+        ]
+        return " ".join(part for part in parts if part)
+
+    @staticmethod
     def _requested_identifiers_from_content(content: str) -> list[str]:
         lowered = content.lower()
         requested: list[str] = []
-        if "npi" in lowered or "ncp id" in lowered:
+        if "npi ids" in lowered or "both npi" in lowered or "all npi" in lowered:
+            requested.append("NPI IDs")
+        elif "npi" in lowered or "ncp id" in lowered:
             requested.append("NPI ID")
         if "hco id" in lowered:
             requested.append("HCO ID")
         if "territory id" in lowered:
             requested.append("territory ID")
         return requested
+
+    @staticmethod
+    def _extract_all_npi_values(text: str) -> list[str]:
+        values: list[str] = []
+        for match in PROVIDER_ID_VALUE_PATTERN.findall(text):
+            if match not in values:
+                values.append(match)
+        return values
 
     @staticmethod
     def _is_valid_territory_id(candidate: str) -> bool:
@@ -222,13 +245,39 @@ class ChatResponder:
 
     @staticmethod
     def _extract_expected_identifier_values(context: dict[str, Any]) -> dict[str, list[str]]:
-        source = f"{context.get('field_rep_says', '')} {context.get('what_happened', '')}"
-        provider_ids = re.findall(r"\bNPI\b\s*[:#-]?\s*(\d{10})", source, re.IGNORECASE)
+        source = ChatResponder._identifier_source_text(context)
+        provider_ids = ChatResponder._extract_all_npi_values(source)
         return {
             "NPI ID": provider_ids,
+            "NPI IDs": provider_ids,
             "HCO ID": [match.upper() for match in re.findall(r"\bHCO\s+ID\b\s*[:#-]?\s*([A-Z0-9-]+)", source, re.IGNORECASE)],
             "territory ID": ChatResponder._extract_all_territory_ids(source),
         }
+
+    @classmethod
+    def _expected_provider_npis_for_query(cls, query: str, context: dict[str, Any]) -> list[str]:
+        source = cls._identifier_source_text(context)
+        query_normalized = normalize_text(query)
+        query_tokens = set(TOKEN_PATTERN.findall(query_normalized))
+        expected: list[str] = []
+
+        for raw_name, npi in PROVIDER_NAME_WITH_NPI_PATTERN.findall(source):
+            normalized_name = normalize_text(raw_name)
+            name_tokens = [token for token in TOKEN_PATTERN.findall(normalized_name) if token]
+            if not name_tokens:
+                continue
+
+            full_name = " ".join(name_tokens)
+            last_name = name_tokens[-1]
+            mentioned = (
+                full_name in query_normalized
+                or last_name in query_tokens
+                or bool(re.search(rf"\bdr\.?\s+{re.escape(last_name)}\b", query, re.IGNORECASE))
+            )
+            if mentioned and npi not in expected:
+                expected.append(npi)
+
+        return expected
 
     @staticmethod
     def _extract_query_identifier_value(identifier_type: str, text: str) -> tuple[str | None, bool]:
@@ -332,9 +381,7 @@ class ChatResponder:
             return True
 
         provider_last_names: set[str] = set()
-        for match in PROVIDER_NAME_PATTERN.findall(
-            f"{context.get('field_rep_says', '')} {context.get('what_happened', '')}"
-        ):
+        for match in PROVIDER_NAME_PATTERN.findall(ChatResponder._identifier_source_text(context)):
             tokens = [token for token in normalize_text(match).split() if token]
             if tokens:
                 provider_last_names.add(tokens[-1])
@@ -347,10 +394,16 @@ class ChatResponder:
 
     def _required_identifiers(self, query: str, context: dict[str, Any]) -> list[str]:
         required: list[str] = []
-        what_happened = str(context.get("what_happened", ""))
-        available_identifiers = self._extract_identifiers(what_happened)
+        identifier_source = self._identifier_source_text(context)
+        available_identifiers = self._extract_identifiers(identifier_source)
+        expected_provider_npis = self._expected_provider_npis_for_query(query, context)
+        query_npis = set(self._extract_all_npi_values(query))
 
-        if "NPI" in available_identifiers and self._query_mentions_provider(query, context) and not self._query_has_provider_id(query):
+        if expected_provider_npis:
+            missing_npis = [npi for npi in expected_provider_npis if npi not in query_npis]
+            if missing_npis:
+                required.append("NPI IDs" if len(expected_provider_npis) > 1 else "NPI ID")
+        elif "NPI" in available_identifiers and self._query_mentions_provider(query, context) and not self._query_has_provider_id(query):
             required.append("NPI ID")
 
         if "HCO ID" in available_identifiers and not IDENTIFIER_PATTERNS["HCO ID"].search(query):
@@ -366,16 +419,21 @@ class ChatResponder:
 
     @staticmethod
     def _format_identifier_follow_up(required_identifiers: list[str], *, correct: bool = False) -> str:
+        labels = [
+            "NPI IDs for all mentioned providers" if identifier == "NPI IDs" else identifier
+            for identifier in required_identifiers
+        ]
         qualifier = "correct " if correct else ""
-        if len(required_identifiers) == 1:
+        if len(labels) == 1:
+            noun = "records" if labels[0].endswith("s") else "record"
             return (
-                f"Please provide the {qualifier}{required_identifiers[0]} so the correct record can be confirmed before proceeding."
+                f"Please provide the {qualifier}{labels[0]} so the correct {noun} can be confirmed before proceeding."
             )
 
-        if len(required_identifiers) == 2:
-            joined = f"{required_identifiers[0]} and {required_identifiers[1]}"
+        if len(labels) == 2:
+            joined = f"{labels[0]} and {labels[1]}"
         else:
-            joined = ", ".join(required_identifiers[:-1]) + f", and {required_identifiers[-1]}"
+            joined = ", ".join(labels[:-1]) + f", and {labels[-1]}"
 
         return f"Please provide the {qualifier}{joined} so the correct records can be confirmed before proceeding."
 
@@ -384,6 +442,7 @@ class ChatResponder:
         reply: str,
         context: dict[str, Any],
         requested_identifiers: list[str],
+        base_query: str | None = None,
     ) -> tuple[dict[str, str], str | None]:
         expected_values = self._extract_expected_identifier_values(context)
         validated: dict[str, str] = {}
@@ -391,6 +450,37 @@ class ChatResponder:
         invalid: list[str] = []
 
         for identifier_type in requested_identifiers:
+            if identifier_type == "NPI IDs":
+                provided_npis = self._extract_all_npi_values(reply)
+                attempted = "npi" in reply.lower() or "ncp" in reply.lower() or bool(re.search(r"\d", reply))
+                if not provided_npis:
+                    if attempted:
+                        invalid.append(identifier_type)
+                    else:
+                        missing.append(identifier_type)
+                    continue
+
+                expected_npis = self._expected_provider_npis_for_query(base_query or "", context)
+                if not expected_npis:
+                    expected_npis = expected_values.get("NPI IDs", [])
+
+                expected_set = {value.upper() for value in expected_npis}
+                provided_set = {value.upper() for value in provided_npis}
+
+                if expected_set:
+                    if any(value.upper() not in expected_set for value in provided_npis):
+                        invalid.append(identifier_type)
+                        continue
+                    if any(value.upper() not in provided_set for value in expected_npis):
+                        missing.append(identifier_type)
+                        continue
+                elif len(provided_npis) < 2:
+                    missing.append(identifier_type)
+                    continue
+
+                validated[identifier_type] = ", ".join(provided_npis)
+                continue
+
             value, attempted = self._extract_query_identifier_value(identifier_type, reply)
             if value is None:
                 if attempted:
@@ -864,6 +954,7 @@ class ChatResponder:
                 user_message,
                 follow_up_state.locked_context,
                 follow_up_state.requested_identifiers,
+                follow_up_state.base_query,
             )
             if validation_follow_up:
                 return AssistantResult(
@@ -921,8 +1012,10 @@ class ChatResponder:
 
         system_prompt = (
             "You are an enterprise CRM support analyst. "
-            "Use only the provided `what_happened` context. "
-            "Do not mention or use any resolution field. "
+            "Use only the provided playbook context. "
+            "Treat `what_happened` as primary evidence and `resolution_and_response_to_rep` as supporting context only. "
+            "Preserve the same answer structure, tone, and level of detail. "
+            "Do not mention internal field names. "
             "Do not invent facts, timelines, IDs, actions, or outcomes. "
             "Do not apologize or use conversational filler. State the reason directly. "
             "Maintain a professional tone suitable for an enterprise CRM support tool."
@@ -932,8 +1025,11 @@ class ChatResponder:
             f"Question mode: {decision.mode}\n\n"
             "Rep question:\n"
             f"{effective_query}\n\n"
-            "Allowed playbook context (`what_happened` only):\n"
+            "Allowed playbook context:\n"
+            "Primary (`what_happened`):\n"
             f"{context[0]['what_happened']}\n\n"
+            "Supporting (`resolution_and_response_to_rep`):\n"
+            f"{context[0].get('resolution_and_response_to_rep', '')}\n\n"
             "OUTPUT FORMAT (strictly follow this structure):\n"
             "1. Start with a 1-2 sentence Summary (plain text, no header, no bullet).\n"
             "2. Then output the following sections as headers (use the exact header text on its own line, no markdown hashes):\n"
@@ -946,12 +1042,13 @@ class ChatResponder:
             "7. Do NOT include Business Impact or Recommended Action sections.\n\n"
             "CONTENT RULES:\n"
             "1. Use only the allowed context above.\n"
-            "2. If mode is `full`, cover the full scenario across all applicable sections.\n"
-            "3. If mode is `partial`, answer only the specific part asked and include only the relevant sections.\n"
-            "4. If mode is `vague`, give a general answer without names, NPIs, HCO IDs, exact dates, exact ZIP codes, exact addresses, territory codes, ship-to IDs, or exact counts.\n"
-            "5. If specific identifiers in the rep question align with the context, you may refer to the matched provider or account by name.\n"
-            "6. Do not apologize, hedge, or add conversational filler.\n"
-            "7. Do NOT add a Data Sources or Recommended Action section - those will be appended separately."
+            "2. Prioritize `what_happened`; use `resolution_and_response_to_rep` only to clarify or complete details when consistent.\n"
+            "3. If mode is `full`, cover the full scenario across all applicable sections.\n"
+            "4. If mode is `partial`, answer only the specific part asked and include only the relevant sections.\n"
+            "5. If mode is `vague`, give a general answer without names, NPIs, HCO IDs, exact dates, exact ZIP codes, exact addresses, territory codes, ship-to IDs, or exact counts.\n"
+            "6. If specific identifiers in the rep question align with the context, you may refer to the matched provider or account by name.\n"
+            "7. Do not apologize, hedge, or add conversational filler.\n"
+            "8. Do NOT add a Data Sources or Recommended Action section - those will be appended separately."
         )
 
         answer = self.azure_client.chat_completion(
