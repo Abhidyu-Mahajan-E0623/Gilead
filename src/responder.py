@@ -790,7 +790,12 @@ class ChatResponder:
     )
 
     _AFFIRMATIVE_PATTERN = re.compile(
-        r"^\s*(?:yes|yeah|yep|yup|sure|go ahead|please|do it|submit|raise|generate|create|file|ok|okay|absolutely|definitely|please do|yes please|ya|y)\b",
+        r"\b(?:yes|yeah|yep|yup|sure|go ahead|please|do it|submit|raise|generate|create|file|ok|okay|absolutely|definitely|please do|yes please|ya|y)\b",
+        re.IGNORECASE,
+    )
+
+    _NEGATIVE_PATTERN = re.compile(
+        r"\b(?:no|nope|nah|don't|do not|stop|cancel|nevermind|ignore)\b",
         re.IGNORECASE,
     )
 
@@ -798,7 +803,12 @@ class ChatResponder:
     def _is_dcr_confirmation(cls, user_message: str, last_assistant_content: str) -> bool:
         if not cls._DCR_PROMPT_PATTERN.search(last_assistant_content):
             return False
-        return bool(cls._AFFIRMATIVE_PATTERN.match(user_message.strip()))
+        
+        msg_lower = user_message.lower()
+        if cls._NEGATIVE_PATTERN.search(msg_lower):
+            return False
+            
+        return bool(cls._AFFIRMATIVE_PATTERN.search(msg_lower))
 
     @classmethod
     def _generate_dcr_number(cls, chat_context: str) -> str:
@@ -1048,7 +1058,8 @@ class ChatResponder:
             "5. If mode is `vague`, give a general answer without names, NPIs, HCO IDs, exact dates, exact ZIP codes, exact addresses, territory codes, ship-to IDs, or exact counts.\n"
             "6. If specific identifiers in the rep question align with the context, you may refer to the matched provider or account by name.\n"
             "7. Do not apologize, hedge, or add conversational filler.\n"
-            "8. Do NOT add a Data Sources or Recommended Action section - those will be appended separately."
+            "8. Do NOT add a Data Sources or Recommended Action section - those will be appended separately.\n"
+            "9. Even if `resolution_and_response_to_rep` states that a DCR or request has been submitted, do NOT state that it has been submitted. The system will ask the user if they want to submit one."
         )
 
         answer = self.azure_client.chat_completion(
